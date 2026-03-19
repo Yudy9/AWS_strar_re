@@ -1,0 +1,464 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Infraestructura completa para aplicación web:
+  VPC, Subnets, IGW, NAT Gateway, EC2 (múltiples),
+  Security Groups, Route Tables, ALB con Health Checks.
+ 
+# ─── PARÁMETROS ───────────────────────────────────────────────────────────────
+Parameters:
+ 
+  NombreProyecto:
+    Type: String
+    Default: MiAppWeb
+    Description: Nombre del proyecto (se usa como prefijo en todos los recursos)
+ 
+  AmbienteDespliegue:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Ambiente de despliegue
+ 
+  TipoInstanciaEC2:
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t2.small, t2.medium, t3.micro, t3.small]
+    Description: Tipo de instancia EC2
+ 
+  CantidadInstancias:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 4
+    Description: Número de instancias EC2 en el Auto Scaling Group
+ 
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: AMI de Amazon Linux 2 (se obtiene automáticamente por región)
+ 
+  CidrVPC:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: Bloque CIDR de la VPC
+ 
+  PuertoAplicacion:
+    Type: Number
+    Default: 80
+    Description: Puerto en el que corre la aplicación web
+ 
+# ─── MAPPINGS ─────────────────────────────────────────────────────────────────
+Mappings:
+  ConfigAmbiente:
+    dev:
+      MultiAZ: false
+      NatGateways: 1
+    staging:
+      MultiAZ: true
+      NatGateways: 1
+    prod:
+      MultiAZ: true
+      NatGateways: 2
+ 
+# ─── RECURSOS ─────────────────────────────────────────────────────────────────
+Resources:
+ 
+  # ── VPC ─────────────────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrVPC
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-${AmbienteDespliegue}-vpc"
+ 
+  # ── INTERNET GATEWAY ────────────────────────────────────────────────────────
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-${AmbienteDespliegue}-igw"
+ 
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+ 
+  # ── SUBNETS PÚBLICAS (2 zonas de disponibilidad) ────────────────────────────
+  SubnetPublica1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-subnet-publica-1"
+        - Key: Tipo
+          Value: publica
+ 
+  SubnetPublica2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-subnet-publica-2"
+        - Key: Tipo
+          Value: publica
+ 
+  # ── SUBNETS PRIVADAS (2 zonas de disponibilidad) ────────────────────────────
+  SubnetPrivada1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-subnet-privada-1"
+        - Key: Tipo
+          Value: privada
+ 
+  SubnetPrivada2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-subnet-privada-2"
+        - Key: Tipo
+          Value: privada
+ 
+  # ── NAT GATEWAY (para que las subnets privadas salgan a internet) ────────────
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachIGW
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-nat-eip"
+ 
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      SubnetId: !Ref SubnetPublica1
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-nat-gw"
+ 
+  # ── ROUTE TABLES ────────────────────────────────────────────────────────────
+ 
+  # Tabla de rutas pública → sale por IGW
+  TablaRutasPublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-rt-publica"
+ 
+  RutaPublicaInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref TablaRutasPublica
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+ 
+  AsociarRutaPublica1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublica1
+      RouteTableId: !Ref TablaRutasPublica
+ 
+  AsociarRutaPublica2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublica2
+      RouteTableId: !Ref TablaRutasPublica
+ 
+  # Tabla de rutas privada → sale por NAT Gateway
+  TablaRutasPrivada:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-rt-privada"
+ 
+  RutaPrivadaNAT:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TablaRutasPrivada
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+ 
+  AsociarRutaPrivada1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivada1
+      RouteTableId: !Ref TablaRutasPrivada
+ 
+  AsociarRutaPrivada2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivada2
+      RouteTableId: !Ref TablaRutasPrivada
+ 
+  # ── SECURITY GROUPS ─────────────────────────────────────────────────────────
+ 
+  # SG para el Load Balancer — acepta tráfico HTTP/HTTPS desde internet
+  SGLoadBalancer:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${NombreProyecto}-sg-alb"
+      GroupDescription: Permite trafico HTTP y HTTPS al Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP desde internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS desde internet
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-sg-alb"
+ 
+  # SG para las instancias EC2 — solo acepta tráfico desde el ALB
+  SGServidoresWeb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${NombreProyecto}-sg-ec2"
+      GroupDescription: Permite trafico solo desde el Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref PuertoAplicacion
+          ToPort: !Ref PuertoAplicacion
+          SourceSecurityGroupId: !Ref SGLoadBalancer
+          Description: Trafico desde ALB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH para administracion
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-sg-ec2"
+ 
+  # ── APPLICATION LOAD BALANCER ───────────────────────────────────────────────
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: AttachIGW
+    Properties:
+      Name: !Sub "${NombreProyecto}-${AmbienteDespliegue}-alb"
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref SubnetPublica1
+        - !Ref SubnetPublica2
+      SecurityGroups:
+        - !Ref SGLoadBalancer
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-alb"
+ 
+  # Target Group — define cómo el ALB distribuye el tráfico a las EC2
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${NombreProyecto}-${AmbienteDespliegue}-tg"
+      VpcId: !Ref VPC
+      Port: !Ref PuertoAplicacion
+      Protocol: HTTP
+      TargetType: instance
+      # ── Health Check ──────────────────────────────────────────────────────
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2       # 2 checks OK → instancia sana
+      UnhealthyThresholdCount: 3     # 3 checks fallidos → instancia enferma
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-tg"
+ 
+  # Listener del ALB — escucha en puerto 80 y redirige al Target Group
+  ListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+ 
+  # ── LAUNCH TEMPLATE (configuración de las EC2) ──────────────────────────────
+  PlantillaLanzamiento:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${NombreProyecto}-lt"
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref TipoInstanciaEC2
+        SecurityGroupIds:
+          - !Ref SGServidoresWeb
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Actualizar el sistema
+            yum update -y
+ 
+            # Instalar Apache
+            yum install -y httpd
+ 
+            # Crear página de inicio con info del servidor
+            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+              -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+              http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+              http://169.254.169.254/latest/meta-data/placement/availability-zone)
+ 
+            cat > /var/www/html/index.html << EOF
+            <!DOCTYPE html>
+            <html>
+            <head><title>${NombreProyecto}</title>
+            <style>
+              body { font-family: Arial; text-align: center; padding: 50px; background: #f0f4f8; }
+              .card { background: white; border-radius: 12px; padding: 40px;
+                      display: inline-block; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+              h1 { color: #FF9900; } p { color: #555; }
+            </style></head>
+            <body>
+              <div class="card">
+                <h1>🚀 ${NombreProyecto}</h1>
+                <p><strong>Instancia:</strong> $INSTANCE_ID</p>
+                <p><strong>Zona:</strong> $AZ</p>
+                <p><strong>Ambiente:</strong> ${AmbienteDespliegue}</p>
+                <p style="color:green">✅ Servidor funcionando correctamente</p>
+              </div>
+            </body></html>
+            EOF
+ 
+            # Iniciar Apache y habilitarlo al arranque
+            systemctl start httpd
+            systemctl enable httpd
+ 
+            # Señal de éxito a CloudFormation
+            /opt/aws/bin/cfn-signal -e $? \
+              --stack ${AWS::StackName} \
+              --resource GrupoAutoScaling \
+              --region ${AWS::Region}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${NombreProyecto}-${AmbienteDespliegue}-servidor"
+              - Key: Proyecto
+                Value: !Ref NombreProyecto
+ 
+  # ── AUTO SCALING GROUP (múltiples instancias EC2) ───────────────────────────
+  GrupoAutoScaling:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: NATGateway
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref CantidadInstancias
+        Timeout: PT10M       # espera hasta 10 minutos la señal de las EC2
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT5M
+        WaitOnResourceSignals: true
+    Properties:
+      AutoScalingGroupName: !Sub "${NombreProyecto}-${AmbienteDespliegue}-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PlantillaLanzamiento
+        Version: !GetAtt PlantillaLanzamiento.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '4'
+      DesiredCapacity: !Ref CantidadInstancias
+      VPCZoneIdentifier:
+        - !Ref SubnetPrivada1
+        - !Ref SubnetPrivada2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub "${NombreProyecto}-ec2"
+          PropagateAtLaunch: true
+ 
+  # ── POLÍTICA DE AUTO SCALING (sube/baja según CPU) ──────────────────────────
+  PoliticaScalingCPU:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref GrupoAutoScaling
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0    # mantiene CPU alrededor del 70%
+ 
+# ─── OUTPUTS ──────────────────────────────────────────────────────────────────
+Outputs:
+ 
+  URLAplicacion:
+    Description: URL pública del Load Balancer para acceder a la aplicación
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+    Export:
+      Name: !Sub "${NombreProyecto}-url"
+ 
+  IdVPC:
+    Description: ID de la VPC creada
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${NombreProyecto}-vpc-id"
+ 
+  SubnetsPublicas:
+    Description: IDs de las subnets públicas
+    Value: !Sub "${SubnetPublica1}, ${SubnetPublica2}"
+ 
+  SubnetsPrivadas:
+    Description: IDs de las subnets privadas
+    Value: !Sub "${SubnetPrivada1}, ${SubnetPrivada2}"
+ 
+  NombreALB:
+    Description: Nombre del Application Load Balancer
+    Value: !Ref LoadBalancer
+ 
+  NombreASG:
+    Description: Nombre del Auto Scaling Group
+    Value: !Ref GrupoAutoScaling
+ 
+  SGServidores:
+    Description: ID del Security Group de los servidores web
+    Value: !Ref SGServidoresWeb
+    Export:
+      Name: !Sub "${NombreProyecto}-sg-ec2"
