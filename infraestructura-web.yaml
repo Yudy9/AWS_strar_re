@@ -1,4 +1,3 @@
-AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Infraestructura completa para aplicación web:
   VPC, Subnets, IGW, NAT Gateway, EC2 (múltiples),
@@ -329,44 +328,11 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            # Actualizar el sistema
             yum update -y
- 
-            # Instalar Apache
             yum install -y httpd
- 
-            # Crear página de inicio con info del servidor
-            TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-              -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
-              http://169.254.169.254/latest/meta-data/instance-id)
-            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
-              http://169.254.169.254/latest/meta-data/placement/availability-zone)
- 
-            cat > /var/www/html/index.html << EOF
-            <!DOCTYPE html>
-            <html>
-            <head><title>${NombreProyecto}</title>
-            <style>
-              body { font-family: Arial; text-align: center; padding: 50px; background: #f0f4f8; }
-              .card { background: white; border-radius: 12px; padding: 40px;
-                      display: inline-block; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-              h1 { color: #FF9900; } p { color: #555; }
-            </style></head>
-            <body>
-              <div class="card">
-                <h1>🚀 ${NombreProyecto}</h1>
-                <p><strong>Instancia:</strong> $INSTANCE_ID</p>
-                <p><strong>Zona:</strong> $AZ</p>
-                <p><strong>Ambiente:</strong> ${AmbienteDespliegue}</p>
-                <p style="color:green">✅ Servidor funcionando correctamente</p>
-              </div>
-            </body></html>
-            EOF
- 
-            # Iniciar Apache y habilitarlo al arranque
             systemctl start httpd
             systemctl enable httpd
+            echo "Hello from AWS CloudFormation Lab" > /var/www/html/index.html
  
             # Señal de éxito a CloudFormation
             /opt/aws/bin/cfn-signal -e $? \
